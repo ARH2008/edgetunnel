@@ -1,0 +1,85 @@
+name: Obfuscate and Release Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '_worker.js'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Extract Version from _worker.js
+        id: get_version
+        run: |
+          node -e "
+          const fs = require('fs');
+          const content = fs.readFileSync('_worker.js', 'utf8');
+          const match = content.match(/const\s+Version\s*=\s*['\"]([^'\"]+)['\"]/i);
+
+          if (match && match[1]) {
+            const rawVer = match[1].trim();
+            // Git tags cannot contain spaces or colons, so sanitize for tag name
+            const safeTag = 'v' + rawVer.replace(/\s+/g, '_').replace(/:/g, '-');
+            fs.appendFileSync(process.env.GITHUB_ENV, \`RAW_VERSION=\${rawVer}\n\`);
+            fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TAG=\${safeTag}\n\`);
+            fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TITLE=Release \${rawVer}\n\`);
+          } else {
+            const fallback = new Date().toISOString().replace(/[:.]/g, '-');
+            fs.appendFileSync(process.env.GITHUB_ENV, \`RAW_VERSION=\${fallback}\n\`);
+            fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TAG=v\${fallback}\n\`);
+            fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TITLE=Release \${fallback}\n\`);
+          }
+          "
+
+      - name: Install javascript-obfuscator
+        run: npm install -g javascript-obfuscator
+
+      - name: Obfuscate _worker.js (Optimized for Cloudflare Free Tier)
+        run: |
+          mkdir -p dist
+          javascript-obfuscator _worker.js \
+            --output dist/_worker.js \
+            --compact true \
+            --identifier-names-generator mangled \
+            --rename-globals false \
+            --string-array true \
+            --string-array-threshold 0.8 \
+            --string-array-encoding none \
+            --string-array-calls-transform false \
+            --string-array-rotate false \
+            --control-flow-flattening false \
+            --dead-code-injection false \
+            --numbers-to-expressions false \
+            --split-strings false \
+            --simplify true
+
+      - name: Create or Overwrite Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if the release already exists
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG exists. Overwriting asset..."
+            gh release upload "$RELEASE_TAG" dist/_worker.js --clobber
+          else
+            echo "Release $RELEASE_TAG does not exist. Creating new release..."
+            gh release create "$RELEASE_TAG" dist/_worker.js \
+              --title "$RELEASE_TITLE" \
+              --notes "Automated release for version \`$RAW_VERSION\` (Commit \`${{ github.sha }}\`)."
+          fi
