@@ -19,38 +19,81 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract Version from _worker.js
-        run: |
-          RAW_VER=$(grep -m1 -oE "Version\s*=\s*['\"][^'\"]+['\"]" _worker.js | sed -E "s/Version\s*=\s*['\"]([^'\"]+)['\"]/\1/" || true)
-          if [ -n "$RAW_VER" ]; then
-            SAFE_TAG="v$(echo "$RAW_VER" | tr ' :' '_-')"
-            echo "RAW_VERSION=$RAW_VER" >> $GITHUB_ENV
-            echo "RELEASE_TAG=$SAFE_TAG" >> $GITHUB_ENV
-            echo "RELEASE_TITLE=Release $RAW_VER" >> $GITHUB_ENV
-          else
-            FALLBACK="$(date +'%Y%m%d-%H%M%S')"
-            echo "RAW_VERSION=$FALLBACK" >> $GITHUB_ENV
-            echo "RELEASE_TAG=v$FALLBACK" >> $GITHUB_ENV
-            echo "RELEASE_TITLE=Release $FALLBACK" >> $GITHUB_ENV
-          fi
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Build & Light Obfuscate (esbuild)
+      - name: Install Terser
+        run: npm install terser
+
+      - name: Light Obfuscation & Build
         run: |
-          mkdir -p dist
-          npx esbuild _worker.js \
-            --bundle \
-            --format=esm \
-            --target=es2022 \
-            --platform=browser \
-            --external:cloudflare:sockets \
-            --minify \
-            --legal-comments=none \
-            --outfile=dist/_worker.js
+          node -e '
+          const fs = require("fs");
+          const { minify } = require("terser");
+
+          async function build() {
+            let code = fs.readFileSync("_worker.js", "utf8");
+
+            // Strip UTF-8 BOM if present
+            if (code.charCodeAt(0) === 0xFEFF) {
+              code = code.slice(1);
+            }
+
+            // Extract Version for Release
+            const match = code.match(/Version\s*=\s*[\x27\x22]([^\x27\x22]+)[\x27\x22]/i);
+            const rawVer = match ? match[1].trim() : new Date().toISOString().slice(0, 10);
+            const safeTag = "v" + rawVer.replace(/\s+/g, "_").replace(/:/g, "-");
+
+            fs.appendFileSync(process.env.GITHUB_ENV, "RAW_VERSION=" + rawVer + "\n");
+            fs.appendFileSync(process.env.GITHUB_ENV, "RELEASE_TAG=" + safeTag + "\n");
+            fs.appendFileSync(process.env.GITHUB_ENV, "RELEASE_TITLE=Release " + rawVer + "\n");
+
+            // Light Obfuscation: Mangle identifiers, strip comments/signatures
+            const result = await minify(code, {
+              module: true,
+              compress: {
+                passes: 2,
+                drop_console: false,
+                drop_debugger: false,
+              },
+              mangle: {
+                toplevel: true,
+                reserved: [
+                  "fetch",
+                  "connect",
+                  "scheduled",
+                  "tail",
+                  "trace",
+                  "env",
+                  "ctx",
+                  "request",
+                  "response",
+                  "Request",
+                  "Response",
+                  "WebSocket",
+                  "WebSocketPair"
+                ]
+              },
+              format: {
+                comments: false,
+                ascii_only: false
+              }
+            });
+
+            if (!fs.existsSync("dist")) {
+              fs.mkdirSync("dist", { recursive: true });
+            }
+            fs.writeFileSync("dist/_worker.js", result.code, "utf8");
+            console.log("dist/_worker.js created successfully.");
+          }
+
+          build().catch(err => {
+            console.error("Build failed:", err);
+            process.exit(1);
+          });
+          '
 
       - name: Create or Overwrite Release
         env:
