@@ -1,4 +1,4 @@
-name: Build, Obfuscate and Release Worker
+name: Build and Release Worker
 
 on:
   push:
@@ -19,99 +19,38 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Extract Version from _worker.js
+        run: |
+          RAW_VER=$(grep -m1 -oE "Version\s*=\s*['\"][^'\"]+['\"]" _worker.js | sed -E "s/Version\s*=\s*['\"]([^'\"]+)['\"]/\1/" || true)
+          if [ -n "$RAW_VER" ]; then
+            SAFE_TAG="v$(echo "$RAW_VER" | tr ' :' '_-')"
+            echo "RAW_VERSION=$RAW_VER" >> $GITHUB_ENV
+            echo "RELEASE_TAG=$SAFE_TAG" >> $GITHUB_ENV
+            echo "RELEASE_TITLE=Release $RAW_VER" >> $GITHUB_ENV
+          else
+            FALLBACK="$(date +'%Y%m%d-%H%M%S')"
+            echo "RAW_VERSION=$FALLBACK" >> $GITHUB_ENV
+            echo "RELEASE_TAG=v$FALLBACK" >> $GITHUB_ENV
+            echo "RELEASE_TITLE=Release $FALLBACK" >> $GITHUB_ENV
+          fi
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Extract Version from _worker.js
-        id: get_version
+      - name: Build & Light Obfuscate (esbuild)
         run: |
-          node -e "
-          const fs = require('fs');
-          const content = fs.readFileSync('_worker.js', 'utf8');
-          const match = content.match(/const\s+Version\s*=\s*['\"]([^'\"]+)['\"]/i);
-
-          if (match && match[1]) {
-            const rawVer = match[1].trim();
-            const safeTag = 'v' + rawVer.replace(/\s+/g, '_').replace(/:/g, '-');
-            fs.appendFileSync(process.env.GITHUB_ENV, \`RAW_VERSION=\${rawVer}\n\`);
-            fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TAG=\${safeTag}\n\`);
-            fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TITLE=Release \${rawVer}\n\`);
-          } else {
-            const fallback = new Date().toISOString().replace(/[:.]/g, '-');
-            fs.appendFileSync(process.env.GITHUB_ENV, \`RAW_VERSION=\${fallback}\n\`);
-            fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TAG=v\${fallback}\n\`);
-            fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TITLE=Release \${fallback}\n\`);
-          }
-          "
-
-      - name: Install BPB Build Dependencies
-        run: npm install esbuild terser
-
-      - name: Build & Obfuscate _worker.js (Exact BPB Pipeline)
-        run: |
-          node -e "
-          import * as esbuild from 'esbuild';
-          import { minify } from 'terser';
-          import fs from 'fs';
-
-          async function build() {
-            // Stage 1: Bundle & Normalize ESM with esbuild (BPB method)
-            const bundled = await esbuild.build({
-              entryPoints: ['_worker.js'],
-              bundle: true,
-              format: 'esm',
-              target: 'es2022',
-              platform: 'browser',
-              external: ['cloudflare:sockets'],
-              write: false,
-            });
-
-            const code = bundled.outputFiles[0].text;
-
-            // Stage 2: Mangle & Obfuscate with Terser (BPB method)
-            const result = await minify(code, {
-              module: true,
-              compress: {
-                passes: 2,
-                drop_console: false,
-                drop_debugger: false,
-              },
-              mangle: {
-                toplevel: true,
-                reserved: [
-                  'fetch',
-                  'connect',
-                  'scheduled',
-                  'tail',
-                  'trace',
-                  'env',
-                  'ctx',
-                  'request',
-                  'response',
-                  'Request',
-                  'Response',
-                  'WebSocket',
-                  'WebSocketPair'
-                ]
-              },
-              format: {
-                comments: false,
-                ascii_only: false
-              }
-            });
-
-            fs.mkdirSync('dist', { recursive: true });
-            fs.writeFileSync('dist/_worker.js', result.code);
-            console.log('Successfully built and obfuscated dist/_worker.js');
-          }
-
-          build().catch(err => {
-            console.error(err);
-            process.exit(1);
-          });
-          "
+          mkdir -p dist
+          npx esbuild _worker.js \
+            --bundle \
+            --format=esm \
+            --target=es2022 \
+            --platform=browser \
+            --external:cloudflare:sockets \
+            --minify \
+            --legal-comments=none \
+            --outfile=dist/_worker.js
 
       - name: Create or Overwrite Release
         env:
