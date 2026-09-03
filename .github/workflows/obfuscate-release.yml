@@ -1,4 +1,4 @@
-name: Obfuscate and Release Worker
+name: Build, Obfuscate and Release Worker
 
 on:
   push:
@@ -46,18 +46,72 @@ jobs:
           }
           "
 
-      - name: Install Terser
-        run: npm install -g terser
+      - name: Install BPB Build Dependencies
+        run: npm install esbuild terser
 
-      - name: Obfuscate and Minify _worker.js (Cloudflare ES Module Compatible)
+      - name: Build & Obfuscate _worker.js (Exact BPB Pipeline)
         run: |
-          mkdir -p dist
-          terser _worker.js \
-            --module \
-            --compress passes=2,drop_console=false,drop_debugger=false \
-            --mangle "toplevel=true,reserved=['fetch','connect','scheduled','tail','trace','env','ctx','request','response','Request','Response','WebSocket','WebSocketPair']" \
-            --format comments=false,ascii_only=false \
-            --output dist/_worker.js
+          node -e "
+          import * as esbuild from 'esbuild';
+          import { minify } from 'terser';
+          import fs from 'fs';
+
+          async function build() {
+            // Stage 1: Bundle & Normalize ESM with esbuild (BPB method)
+            const bundled = await esbuild.build({
+              entryPoints: ['_worker.js'],
+              bundle: true,
+              format: 'esm',
+              target: 'es2022',
+              platform: 'browser',
+              external: ['cloudflare:sockets'],
+              write: false,
+            });
+
+            const code = bundled.outputFiles[0].text;
+
+            // Stage 2: Mangle & Obfuscate with Terser (BPB method)
+            const result = await minify(code, {
+              module: true,
+              compress: {
+                passes: 2,
+                drop_console: false,
+                drop_debugger: false,
+              },
+              mangle: {
+                toplevel: true,
+                reserved: [
+                  'fetch',
+                  'connect',
+                  'scheduled',
+                  'tail',
+                  'trace',
+                  'env',
+                  'ctx',
+                  'request',
+                  'response',
+                  'Request',
+                  'Response',
+                  'WebSocket',
+                  'WebSocketPair'
+                ]
+              },
+              format: {
+                comments: false,
+                ascii_only: false
+              }
+            });
+
+            fs.mkdirSync('dist', { recursive: true });
+            fs.writeFileSync('dist/_worker.js', result.code);
+            console.log('Successfully built and obfuscated dist/_worker.js');
+          }
+
+          build().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          "
 
       - name: Create or Overwrite Release
         env:
