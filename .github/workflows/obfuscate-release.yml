@@ -46,31 +46,18 @@ jobs:
           }
           "
 
-      - name: Install javascript-obfuscator
-        run: npm install -g javascript-obfuscator
+      - name: Install Terser
+        run: npm install -g terser
 
-      - name: Obfuscate _worker.js (Cloudflare Worker ES Module Safe)
+      - name: Obfuscate and Minify _worker.js (Cloudflare ES Module Compatible)
         run: |
           mkdir -p dist
-          javascript-obfuscator _worker.js \
-            --output dist/_worker.js \
-            --target "browser" \
-            --compact true \
-            --rename-globals false \
-            --transform-object-keys false \
-            --self-defending false \
-            --debug-protection false \
-            --control-flow-flattening false \
-            --dead-code-injection false \
-            --numbers-to-expressions false \
-            --split-strings false \
-            --string-array true \
-            --string-array-threshold 0.75 \
-            --string-array-encoding none \
-            --string-array-calls-transform false \
-            --string-array-rotate false \
-            --unicode-escape-sequence false \
-            --reserved-names "^(fetch|connect|scheduled|tail|trace|env|ctx|request|response|Response|Request|WebSocket|WebSocketPair)$"
+          terser _worker.js \
+            --module \
+            --compress passes=2,drop_console=false,drop_debugger=false \
+            --mangle "toplevel=true,reserved=['fetch','connect','scheduled','tail','trace','env','ctx','request','response','Request','Response','WebSocket','WebSocketPair']" \
+            --format comments=false,ascii_only=false \
+            --output dist/_worker.js
 
       - name: Create or Overwrite Release
         env:
