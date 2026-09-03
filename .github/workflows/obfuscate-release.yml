@@ -34,7 +34,6 @@ jobs:
 
           if (match && match[1]) {
             const rawVer = match[1].trim();
-            // Git tags cannot contain spaces or colons, so sanitize for tag name
             const safeTag = 'v' + rawVer.replace(/\s+/g, '_').replace(/:/g, '-');
             fs.appendFileSync(process.env.GITHUB_ENV, \`RAW_VERSION=\${rawVer}\n\`);
             fs.appendFileSync(process.env.GITHUB_ENV, \`RELEASE_TAG=\${safeTag}\n\`);
@@ -50,30 +49,33 @@ jobs:
       - name: Install javascript-obfuscator
         run: npm install -g javascript-obfuscator
 
-      - name: Obfuscate _worker.js (Optimized for Cloudflare Free Tier)
+      - name: Obfuscate _worker.js (Cloudflare Worker ES Module Safe)
         run: |
           mkdir -p dist
           javascript-obfuscator _worker.js \
             --output dist/_worker.js \
+            --target "browser" \
             --compact true \
-            --identifier-names-generator mangled \
             --rename-globals false \
-            --string-array true \
-            --string-array-threshold 0.8 \
-            --string-array-encoding none \
-            --string-array-calls-transform false \
-            --string-array-rotate false \
+            --transform-object-keys false \
+            --self-defending false \
+            --debug-protection false \
             --control-flow-flattening false \
             --dead-code-injection false \
             --numbers-to-expressions false \
             --split-strings false \
-            --simplify true
+            --string-array true \
+            --string-array-threshold 0.75 \
+            --string-array-encoding none \
+            --string-array-calls-transform false \
+            --string-array-rotate false \
+            --unicode-escape-sequence false \
+            --reserved-names "^(fetch|connect|scheduled|tail|trace|env|ctx|request|response|Response|Request|WebSocket|WebSocketPair)$"
 
       - name: Create or Overwrite Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if the release already exists
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG exists. Overwriting asset..."
             gh release upload "$RELEASE_TAG" dist/_worker.js --clobber
