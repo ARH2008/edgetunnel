@@ -1,4 +1,4 @@
-name: Build and Release Worker
+name: Obfuscate and Release Worker
 
 on:
   push:
@@ -24,75 +24,67 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Terser
-        run: npm install terser
+      - name: Install javascript-obfuscator
+        run: npm install -g javascript-obfuscator
 
-      - name: Light Obfuscation & Build
+      - name: Obfuscate _worker.js (Fork-Standard Pipeline)
         run: |
           node -e '
           const fs = require("fs");
-          const { minify } = require("terser");
+          const { execSync } = require("child_process");
 
-          async function build() {
-            let code = fs.readFileSync("_worker.js", "utf8");
-
-            // Strip UTF-8 BOM if present
-            if (code.charCodeAt(0) === 0xFEFF) {
-              code = code.slice(1);
-            }
-
-            // Extract Version for Release
-            const match = code.match(/Version\s*=\s*[\x27\x22]([^\x27\x22]+)[\x27\x22]/i);
-            const rawVer = match ? match[1].trim() : new Date().toISOString().slice(0, 10);
-            const safeTag = "v" + rawVer.replace(/\s+/g, "_").replace(/:/g, "-");
-
-            fs.appendFileSync(process.env.GITHUB_ENV, "RAW_VERSION=" + rawVer + "\n");
-            fs.appendFileSync(process.env.GITHUB_ENV, "RELEASE_TAG=" + safeTag + "\n");
-            fs.appendFileSync(process.env.GITHUB_ENV, "RELEASE_TITLE=Release " + rawVer + "\n");
-
-            // Light Obfuscation: Mangle identifiers, strip comments/signatures
-            const result = await minify(code, {
-              module: true,
-              compress: {
-                passes: 2,
-                drop_console: false,
-                drop_debugger: false,
-              },
-              mangle: {
-                toplevel: true,
-                reserved: [
-                  "fetch",
-                  "connect",
-                  "scheduled",
-                  "tail",
-                  "trace",
-                  "env",
-                  "ctx",
-                  "request",
-                  "response",
-                  "Request",
-                  "Response",
-                  "WebSocket",
-                  "WebSocketPair"
-                ]
-              },
-              format: {
-                comments: false,
-                ascii_only: false
-              }
-            });
-
-            if (!fs.existsSync("dist")) {
-              fs.mkdirSync("dist", { recursive: true });
-            }
-            fs.writeFileSync("dist/_worker.js", result.code, "utf8");
-            console.log("dist/_worker.js created successfully.");
+          // 1. Read _worker.js and remove BOM if present
+          let code = fs.readFileSync("_worker.js", "utf8");
+          if (code.charCodeAt(0) === 0xFEFF) {
+            code = code.slice(1);
           }
 
-          build().catch(err => {
-            console.error("Build failed:", err);
-            process.exit(1);
-          });
+          // 2. Extract Version from code
+          const vMatch = code.match(/Version\s*=\s*[\x27\x22]([^\x27\x22]+)[\x27\x22]/i);
+          const rawVer = vMatch ? vMatch[1].trim() : new Date().toISOString().slice(0, 10);
+          const safeTag = "v" + rawVer.replace(/\s+/g, "_").replace(/:/g, "-");
+
+          fs.appendFileSync(process.env.GITHUB_ENV, "RAW_VERSION=" + rawVer + "\n");
+          fs.appendFileSync(process.env.GITHUB_ENV, "RELEASE_TAG=" + safeTag + "\n");
+          fs.appendFileSync(process.env.GITHUB_ENV, "RELEASE_TITLE=Release " + rawVer + "\n");
+
+          // 3. Extract top-level imports to prevent V8 syntax errors
+          const importRegex = /^import\s+[^;]+from\s+[\x27\x22][^\x27\x22]+[\x27\x22];?/gm;
+          const imports = code.match(importRegex) || [];
+          const codeWithoutImports = code.replace(importRegex, "");
+
+          fs.mkdirSync("dist", { recursive: true });
+          fs.writeFileSync("temp_worker.js", codeWithoutImports, "utf8");
+
+          // 4. Run obfuscator with settings matching edgetunnel forks
+          execSync(`javascript-obfuscator temp_worker.js \
+            --output dist/_worker.js \
+            --compact true \
+            --identifier-names-generator hexadecimal \
+            --rename-globals false \
+            --transform-object-keys false \
+            --self-defending false \
+            --debug-protection false \
+            --control-flow-flattening false \
+            --dead-code-injection false \
+            --numbers-to-expressions false \
+            --split-strings false \
+            --string-array true \
+            --string-array-threshold 0.75 \
+            --string-array-encoding none \
+            --string-array-calls-transform false \
+            --string-array-rotate false \
+            --simplify true`, { stdio: "inherit" });
+
+          // 5. Prepend imports to Line 1 of the output
+          const obfuscated = fs.readFileSync("dist/_worker.js", "utf8");
+          const finalHeader = imports.length > 0 ? imports.join("\n") + "\n" : "";
+          fs.writeFileSync("dist/_worker.js", finalHeader + obfuscated, "utf8");
+
+          if (fs.existsSync("temp_worker.js")) {
+            fs.unlinkSync("temp_worker.js");
+          }
+          console.log("Obfuscation completed successfully.");
           '
 
       - name: Create or Overwrite Release
