@@ -1,4 +1,4 @@
-name: Obfuscate and Release Worker
+name: Randomize and Release Worker
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  randomize-and-release:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,67 +24,79 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install javascript-obfuscator
-        run: npm install -g javascript-obfuscator
+      - name: Extract Version from _worker.js
+        run: |
+          RAW_VER=$(grep -m1 -oE "Version\s*=\s*['\"][^'\"]+['\"]" _worker.js | sed -E "s/Version\s*=\s*['\"]([^'\"]+)['\"]/\1/" || true)
+          if [ -n "$RAW_VER" ]; then
+            SAFE_TAG="v$(echo "$RAW_VER" | tr ' :' '_-')"
+            echo "RAW_VERSION=$RAW_VER" >> $GITHUB_ENV
+            echo "RELEASE_TAG=$SAFE_TAG" >> $GITHUB_ENV
+            echo "RELEASE_TITLE=Release $RAW_VER" >> $GITHUB_ENV
+          else
+            FALLBACK="$(date +'%Y%m%d-%H%M%S')"
+            echo "RAW_VERSION=$FALLBACK" >> $GITHUB_ENV
+            echo "RELEASE_TAG=v$FALLBACK" >> $GITHUB_ENV
+            echo "RELEASE_TITLE=Release $FALLBACK" >> $GITHUB_ENV
+          fi
 
-      - name: Obfuscate _worker.js (Fork-Standard Pipeline)
+      - name: BPB-Style Randomizer & Signature Mutator
         run: |
           node -e '
           const fs = require("fs");
-          const { execSync } = require("child_process");
+          const crypto = require("crypto");
 
-          // 1. Read _worker.js and remove BOM if present
+          // 1. Read _worker.js and remove BOM
           let code = fs.readFileSync("_worker.js", "utf8");
           if (code.charCodeAt(0) === 0xFEFF) {
             code = code.slice(1);
           }
 
-          // 2. Extract Version from code
-          const vMatch = code.match(/Version\s*=\s*[\x27\x22]([^\x27\x22]+)[\x27\x22]/i);
-          const rawVer = vMatch ? vMatch[1].trim() : new Date().toISOString().slice(0, 10);
-          const safeTag = "v" + rawVer.replace(/\s+/g, "_").replace(/:/g, "-");
-
-          fs.appendFileSync(process.env.GITHUB_ENV, "RAW_VERSION=" + rawVer + "\n");
-          fs.appendFileSync(process.env.GITHUB_ENV, "RELEASE_TAG=" + safeTag + "\n");
-          fs.appendFileSync(process.env.GITHUB_ENV, "RELEASE_TITLE=Release " + rawVer + "\n");
-
-          // 3. Extract top-level imports to prevent V8 syntax errors
-          const importRegex = /^import\s+[^;]+from\s+[\x27\x22][^\x27\x22]+[\x27\x22];?/gm;
-          const imports = code.match(importRegex) || [];
-          const codeWithoutImports = code.replace(importRegex, "");
-
-          fs.mkdirSync("dist", { recursive: true });
-          fs.writeFileSync("temp_worker.js", codeWithoutImports, "utf8");
-
-          // 4. Run obfuscator with settings matching edgetunnel forks
-          execSync(`javascript-obfuscator temp_worker.js \
-            --output dist/_worker.js \
-            --compact true \
-            --identifier-names-generator hexadecimal \
-            --rename-globals false \
-            --transform-object-keys false \
-            --self-defending false \
-            --debug-protection false \
-            --control-flow-flattening false \
-            --dead-code-injection false \
-            --numbers-to-expressions false \
-            --split-strings false \
-            --string-array true \
-            --string-array-threshold 0.75 \
-            --string-array-encoding none \
-            --string-array-calls-transform false \
-            --string-array-rotate false \
-            --simplify true`, { stdio: "inherit" });
-
-          // 5. Prepend imports to Line 1 of the output
-          const obfuscated = fs.readFileSync("dist/_worker.js", "utf8");
-          const finalHeader = imports.length > 0 ? imports.join("\n") + "\n" : "";
-          fs.writeFileSync("dist/_worker.js", finalHeader + obfuscated, "utf8");
-
-          if (fs.existsSync("temp_worker.js")) {
-            fs.unlinkSync("temp_worker.js");
+          // 2. Random helper utilities (mimicking BPB random.go)
+          function randString(len) {
+            return crypto.randomBytes(Math.ceil(len / 2)).toString("hex").slice(0, len);
           }
-          console.log("Obfuscation completed successfully.");
+
+          function randInt(min, max) {
+            return Math.floor(Math.random() * (max - min + 1)) + min;
+          }
+
+          // 3. Generate dynamic junk code block
+          const uniqueSalt = randString(32);
+          let junkBlock = `\n\n// ================= BPB ANTI-SCANNER SIGNATURE SALT =================\n`;
+          junkBlock += `// __CF_HASH_SALT__ = "${uniqueSalt}";\n`;
+
+          const numJunk = randInt(5, 10);
+          for (let i = 0; i < numJunk; i++) {
+            const funcName = `_0x${randString(6)}`;
+            const var1 = `_0x${randString(5)}`;
+            const var2 = `_0x${randString(5)}`;
+            const val1 = randInt(10000, 999999);
+            const val2 = randInt(100, 9999);
+            const strVal = randString(randInt(8, 24));
+
+            const junkType = randInt(1, 3);
+            if (junkType === 1) {
+              junkBlock += `const ${funcName} = function() { let ${var1} = ${val1}; let ${var2} = "${strVal}"; return ${var1} + ${val2}; };\n`;
+            } else if (junkType === 2) {
+              junkBlock += `const ${funcName} = [${val1}, "${strVal}", 0x${randString(4)}, ${val2}];\n`;
+            } else {
+              junkBlock += `function ${funcName}() { return (0x${randString(4)} ^ ${val1}) + "${strVal}"; }\n`;
+            }
+          }
+
+          // 4. Append the randomized block to the worker code
+          const randomizedCode = code.trim() + junkBlock;
+
+          // 5. Output file
+          if (!fs.existsSync("dist")) {
+            fs.mkdirSync("dist", { recursive: true });
+          }
+          fs.writeFileSync("dist/_worker.js", randomizedCode, "utf8");
+
+          // 6. Calculate & print new SHA-256 for verification
+          const hash = crypto.createHash("sha256").update(randomizedCode).digest("hex");
+          console.log("Successfully generated randomized worker.");
+          console.log("Unique SHA-256 Fingerprint:", hash);
           '
 
       - name: Create or Overwrite Release
@@ -98,5 +110,5 @@ jobs:
             echo "Release $RELEASE_TAG does not exist. Creating new release..."
             gh release create "$RELEASE_TAG" dist/_worker.js \
               --title "$RELEASE_TITLE" \
-              --notes "Automated release for version \`$RAW_VERSION\` (Commit \`${{ github.sha }}\`)."
+              --notes "Automated release for version \`$RAW_VERSION\` with dynamic anti-scanner signature (Commit \`${{ github.sha }}\`)."
           fi
